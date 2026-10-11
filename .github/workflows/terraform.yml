@@ -1,0 +1,193 @@
+name: terraform
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TF_VERSION: "1.16.5"
+  TF_IN_AUTOMATION: "1"
+  TF_INPUT: "0"
+  ARM_USE_OIDC: "true"
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+  OKTA_ORG_NAME: ${{ vars.OKTA_ORG_NAME }}
+  OKTA_BASE_URL: ${{ vars.OKTA_BASE_URL }}
+
+jobs:
+  plan:
+    name: plan
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write # request the GitHub OIDC token for Azure
+      pull-requests: write
+    env:
+      ARM_CLIENT_ID: ${{ vars.AZURE_PLAN_CLIENT_ID }}
+      OKTA_API_CLIENT_ID: ${{ vars.OKTA_PLAN_CLIENT_ID }}
+      OKTA_API_PRIVATE_KEY_ID: ${{ vars.OKTA_PLAN_KEY_ID }}
+      OKTA_API_PRIVATE_KEY: ${{ secrets.OKTA_PLAN_PRIVATE_KEY }}
+      OKTA_API_SCOPES: okta.groups.read,okta.apps.read,okta.policies.read,okta.authenticators.read,okta.users.read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Format check
+        id: fmt
+        run: terraform fmt -check -recursive -diff
+        continue-on-error: true
+
+      - name: Init
+        run: terraform init
+
+      - name: Validate
+        run: terraform validate -no-color
+
+      - name: Plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -no-color -lock=false -detailed-exitcode > plan.txt 2>&1
+          code=$?
+          set -e
+          cat plan.txt
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          [ "$code" -ne 1 ]
+
+      - name: Comment plan on PR
+        if: always() && steps.plan.outputs.exitcode != ''
+        uses: actions/github-script@v7
+        env:
+          PLAN_EXIT: ${{ steps.plan.outputs.exitcode }}
+          FMT_OUTCOME: ${{ steps.fmt.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- okta-terraform-plan -->';
+            let plan = fs.readFileSync('plan.txt', 'utf8');
+
+            // Lead with the summary line: it's the first thing to read.
+            const summary =
+              (plan.match(/^Plan: .*$/m) || [])[0] ||
+              (plan.includes('No changes.') ? 'No changes.' : 'Plan failed. See the output below.');
+            const checkWarning = /Check block assertion failed/.test(plan)
+              ? '\n> **A `check` block failed.** A console-owned setting has changed. See the warning in the output.\n'
+              : '';
+
+            const max = 60000; // PR comments are capped at 65,536 characters
+            if (plan.length > max) {
+              plan = '(truncated; the full output is in the job log)\n' + plan.slice(-max);
+            }
+
+            const fmt = process.env.FMT_OUTCOME === 'success'
+              ? 'passed'
+              : 'failed: run `terraform fmt -recursive` and push again';
+            const sha = context.payload.pull_request.head.sha.substring(0, 7);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const body = [
+              marker,
+              `### Terraform plan for \`${sha}\``,
+              '',
+              `**${summary}**`,
+              checkWarning,
+              `Format check: ${fmt} · [Run log](${runUrl})`,
+              '',
+              '<details><summary>Full plan</summary>',
+              '',
+              '```',
+              plan,
+              '```',
+              '</details>',
+            ].join('\n');
+
+            // Update one comment per PR instead of adding a new one per push.
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Fail on formatting
+        if: steps.fmt.outcome == 'failure'
+        run: |
+          echo "::error::Terraform files are not formatted. Run 'terraform fmt -recursive' and push again."
+          exit 1
+
+  apply:
+    name: apply
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: okta-apply
+    # One apply at a time, never cancelled mid-apply.
+    concurrency:
+      group: okta-terraform-apply
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ARM_CLIENT_ID: ${{ vars.AZURE_APPLY_CLIENT_ID }}
+      OKTA_API_CLIENT_ID: ${{ vars.OKTA_APPLY_CLIENT_ID }}
+      OKTA_API_PRIVATE_KEY_ID: ${{ vars.OKTA_APPLY_KEY_ID }}
+      OKTA_API_PRIVATE_KEY: ${{ secrets.OKTA_APPLY_PRIVATE_KEY }}
+      OKTA_API_SCOPES: okta.groups.manage,okta.apps.manage,okta.policies.manage,okta.authenticators.manage,okta.users.read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Init
+        run: terraform init
+
+      - name: Plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -no-color -detailed-exitcode -out=tfplan > plan.txt 2>&1
+          code=$?
+          set -e
+          cat plan.txt
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Plan on main"
+            echo
+            grep -E '^Plan: |^No changes\.' plan.txt || echo "Plan failed. See the job log."
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$code" -ne 1 ]
+
+      - name: Apply
+        if: steps.plan.outputs.exitcode == '2'
+        run: |
+          set -o pipefail  # without it, tee would hide a failed apply
+          terraform apply -no-color tfplan | tee apply.txt
+          {
+            echo
+            echo "### Apply"
+            echo
+            grep -E '^Apply complete' apply.txt || true
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Nothing to apply
+        if: steps.plan.outputs.exitcode == '0'
+        run: echo "No changes on main. Skipping apply." | tee -a "$GITHUB_STEP_SUMMARY"
