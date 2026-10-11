@@ -32,3 +32,16 @@ resource "okta_app_oauth" "webapp01" {
   user_name_template_type              = "BUILT_IN"
   wildcard_redirect                    = "DISABLED"
 }
+
+resource "okta_app_saml" "scim_test" {
+  authentication_policy       = "rst14lmibu1lAIBTC698"
+  honor_force_authn           = false
+  implicit_assignment         = false
+  label                       = "SCIM 2.0 Test App (OAuth Bearer Token)"
+  preconfigured_app           = "scim2testapp"
+  response_signed             = false
+  saml_signed_request_enabled = false
+  status                      = "ACTIVE"
+  user_name_template          = "$${source.login}"
+  user_name_template_type     = "BUILT_IN"
+}
