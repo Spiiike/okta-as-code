@@ -1,0 +1,16 @@
+# Provider download cache (recreated by init)
+.terraform/
+
+# State never belongs in git; it lives in Azure
+*.tfstate
+*.tfstate.*
+
+# Crash logs can contain request/response data
+crash.log
+crash.*.log
+
+# Local credentials
+*.pem
+*.key
+.env
+okta.env
