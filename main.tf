@@ -22,3 +22,5 @@ provider "okta" {}
 data "okta_group" "everyone" {
   name = "Everyone"
 }
+
+# The quick brown fox jumps over the lazy dog.
