@@ -4,7 +4,7 @@ resource "okta_app_oauth" "webapp01" {
     app                = {}
     manualProvisioning = false
   })
-  authentication_policy                = "rst14lmibu1lAIBTC698"
+  authentication_policy = okta_app_signon_policy.webapp01.id
   auto_key_rotation                    = true
   auto_submit_toolbar                  = false
   client_id                            = "0oa17safg6d3Iix1o698"
