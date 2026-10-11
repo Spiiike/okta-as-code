@@ -45,3 +45,9 @@ resource "okta_app_saml" "scim_test" {
   user_name_template          = "$${source.login}"
   user_name_template_type     = "BUILT_IN"
 }
+check "scim_deprovisioning_enabled" {
+  assert {
+    condition     = contains(okta_app_saml.scim_test.features, "PUSH_USER_DEACTIVATION")
+    error_message = "SCIM app no longer deactivates users downstream. Leavers would keep access in webapp01. Check the app's Provisioning tab."
+  }
+}
