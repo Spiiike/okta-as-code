@@ -22,5 +22,3 @@ provider "okta" {}
 data "okta_group" "everyone" {
   name = "Everyone"
 }
-
-# test ci/cd
