@@ -1,0 +1,136 @@
+name: drift
+
+on:
+  schedule:
+    - cron: "17 11 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: okta-terraform-drift
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.16.5"
+  TF_IN_AUTOMATION: "1"
+  TF_INPUT: "0"
+  ARM_USE_OIDC: "true"
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  OKTA_ORG_NAME: ${{ vars.OKTA_ORG_NAME }}
+  OKTA_BASE_URL: ${{ vars.OKTA_BASE_URL }}
+
+jobs:
+  drift:
+    name: drift
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+    env:
+      ARM_CLIENT_ID: ${{ vars.AZURE_PLAN_CLIENT_ID }}
+      OKTA_API_CLIENT_ID: ${{ vars.OKTA_PLAN_CLIENT_ID }}
+      OKTA_API_PRIVATE_KEY_ID: ${{ vars.OKTA_PLAN_KEY_ID }}
+      OKTA_API_PRIVATE_KEY: ${{ secrets.OKTA_PLAN_PRIVATE_KEY }}
+      OKTA_API_SCOPES: okta.groups.read,okta.apps.read,okta.policies.read,okta.authenticators.read,okta.users.read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Init
+        run: terraform init
+
+      - name: Plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -no-color -lock=false -detailed-exitcode > plan.txt 2>&1
+          code=$?
+          set -e
+          cat plan.txt
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          # A failed plan must fail the job: if detection silently breaks
+          # (expired key, removed scope), you'd never hear about drift again.
+          [ "$code" -ne 1 ]
+
+      - name: Open, update or close the drift issue
+        uses: actions/github-script@v7
+        env:
+          PLAN_EXIT: ${{ steps.plan.outputs.exitcode }}
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const marker = '<!-- okta-drift -->';
+            const label = 'drift';
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            let plan = fs.readFileSync('plan.txt', 'utf8');
+            const changed = process.env.PLAN_EXIT === '2';
+            const checkFailed = /Check block assertion failed/.test(plan);
+            const summary = (plan.match(/^Plan: .*$/m) || [])[0] || 'No resource changes.';
+
+            // Make sure the label exists (422 = it already does).
+            try {
+              await github.rest.issues.createLabel({ owner, repo, name: label, color: 'd93f0b', description: 'Okta no longer matches the Terraform code' });
+            } catch (e) {
+              if (e.status !== 422) throw e;
+            }
+
+            const open = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'open', labels: label });
+            const existing = open.find(i => i.body && i.body.includes(marker));
+
+            if (!changed && !checkFailed) {
+              if (existing) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body: `Resolved: the plan is clean again. [Run](${runUrl})` });
+                await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: 'closed', state_reason: 'completed' });
+              }
+              core.info('No drift.');
+              return;
+            }
+
+            const max = 60000;
+            if (plan.length > max) {
+              plan = '(truncated; the full output is in the run log)\n' + plan.slice(-max);
+            }
+
+            const reasons = [];
+            if (changed) reasons.push(`- **Resources differ from the code:** ${summary}`);
+            if (checkFailed) reasons.push('- **A `check` block failed:** a console-owned setting has changed (see the warning in the plan).');
+
+            const body = [
+              marker,
+              `Okta no longer matches \`main\`. Last checked: ${new Date().toISOString()} · [Run](${runUrl})`,
+              '',
+              ...reasons,
+              '',
+              '**Respond with one of:**',
+              '- **Revert:** Actions → terraform → Run workflow on `main`. Terraform puts Okta back to what the code says.',
+              '- **Legitimize:** open a PR that changes the code to match the approved change.',
+              '',
+              'This issue closes itself on the first clean run.',
+              '',
+              '<details><summary>Plan</summary>',
+              '',
+              '```',
+              plan,
+              '```',
+              '</details>',
+            ].join('\n');
+
+            if (existing) {
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, body });
+              core.warning(`Drift still present: #${existing.number}`);
+            } else {
+              const { data } = await github.rest.issues.create({ owner, repo, title: 'Drift detected in Okta', body, labels: [label] });
+              core.warning(`Drift detected: #${data.number}`);
+            }

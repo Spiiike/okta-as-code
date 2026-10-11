@@ -23,3 +23,5 @@ resource "okta_app_group_assignments" "scim_test" {
     prevent_destroy = true
   }
 }
+
+## test ci/cd
