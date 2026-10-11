@@ -18,6 +18,7 @@ resource "okta_app_oauth" "webapp01" {
   label                                = "webapp01"
   login_mode                           = "DISABLED"
   login_scopes                         = []
+  omit_secret                          = true
   participate_slo                      = false
   pkce_required                        = false
   post_logout_redirect_uris            = ["https://wetcliff-a5bcemhpa3c2dmgn.eastus2-01.azurewebsites.net/labs/identity/expenses"]
