@@ -7,7 +7,7 @@ resource "okta_app_signon_policy" "webapp01" {
 resource "okta_app_signon_policy_rule" "webapp01_members" {
   policy_id = okta_app_signon_policy.webapp01.id
   name      = "MegasXLR members, 2FA"
-  priority  = 3   # was 1
+  priority  = 3 # was 1
 
   access          = "ALLOW"
   groups_included = [okta_group.main_group.id]
